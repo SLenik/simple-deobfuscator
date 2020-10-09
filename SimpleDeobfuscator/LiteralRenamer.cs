@@ -1,4 +1,5 @@
-﻿using System.Linq;
+﻿using System;
+using System.Linq;
 using System.Text;
 using Mono.Cecil;
 
@@ -9,55 +10,143 @@ namespace SimpleDeobfuscator
         public static void FixNaming(ModuleDefinition module)
         {
             foreach (var type in module.GetTypes())
-                FixNaming(type);
+                FixTypeNaming(type);
+
+            foreach (var type in module.GetTypes())
+                FixMembersNaming(type);
+
+            foreach (var type in module.GetTypes())
+                FixMethodBodyReferenceNaming(type);
         }
 
-        private static void FixNaming(TypeDefinition type)
+        private static void FixTypeNaming(TypeDefinition type)
         {
-            var currentTypeName = type.Name;
-            var newTypeName = TryFixName(currentTypeName);
-            if (newTypeName != currentTypeName)
+            if (type.Name == "<Module>")
+                return;
+
+            FixNaming(type, t => t.Namespace, (t, name) => t.Namespace = name, "Ns_");
+
+            const string privateImplDetailsPrefix = "<PrivateImplementationDetails>";
+            const int guidInStringLength = 36;
+
+            if (type.Name.StartsWith(privateImplDetailsPrefix))
             {
-                type.Name = newTypeName;
+                var switchUniqueName = "Switch_" + type.Name
+                    .Substring(privateImplDetailsPrefix.Length + 1, guidInStringLength)
+                    .Replace("-", "");
+                type.Name = switchUniqueName;
+            }
+            else
+            {
+                var typePrefix = "";
+
+                if (type.IsInterface) typePrefix = "Interface_";
+                else if (type.IsValueType) typePrefix = "Struct_";
+                else if (type.IsEnum) typePrefix = "Enum_";
+                else if (type.IsException()) typePrefix = "Exception_";
+                else if (type.IsSealed && type.IsAbstract) typePrefix = "StaticClass_";
+                else if (type.IsClass) typePrefix = "Class_";
+
+                FixNaming(type, t => t.Name, (t, name) => t.Name = name, typePrefix);
             }
 
             foreach (var nestedType in type.NestedTypes)
-                FixNaming(nestedType);
+                FixTypeNaming(nestedType);
 
             foreach (var typeParameter in type.GenericParameters)
-                FixNaming(typeParameter);
+                FixNaming(typeParameter, t => t.Name, (t, name) => t.Name = name);
+        }
+
+        private static void FixMembersNaming(TypeDefinition type)
+        {
+            foreach (var nestedType in type.NestedTypes)
+                FixMembersNaming(nestedType);
 
             foreach (var field in type.Fields)
-                FixNaming(field);
-            foreach (var method in type.Properties)
-                FixNaming(method);
+                FixFieldNaming(field);
+
+            foreach (var property in type.Properties)
+                FixPropertyNaming(property);
+
             foreach (var method in type.Methods)
-            {
-                FixNaming(method);
-                foreach (var methodParameter in method.Parameters)
-                    FixNaming(methodParameter);
-                foreach (var methodGenericParameter in method.GenericParameters)
-                    FixNaming(methodGenericParameter);
-            }
+                FixMethodNaming(method);
         }
 
-        private static void FixNaming(ParameterReference member)
+        private static void FixMethodBodyReferenceNaming(TypeDefinition type)
         {
-            var currentName = member.Name;
+            foreach (var nestedType in type.NestedTypes)
+                FixMethodBodyReferenceNaming(nestedType);
+
+            foreach (var method in type.Methods)
+                if (method.HasBody)
+                {
+                    var body = method.Body;
+                    foreach (var instruction in body.Instructions)
+                    {
+                        switch (instruction.Operand)
+                        {
+                            case MethodReference methodRef:
+                                FixMethodNaming(methodRef);
+                                break;
+
+                            case FieldReference fieldRef:
+                                FixFieldNaming(fieldRef);
+                                break;
+                        }
+                    }
+                }
+        }
+
+        private static void FixMethodNaming(MethodReference method)
+        {
+            if (method.Name == ".ctor" || method.Name == ".cctor")
+                return;
+
+            FixNaming(method, t => t.Name, (t, name) => t.Name = name, "_" + TypeNameToMemberPrefix(method.ReturnType.GetElementType().Name));
+        }
+
+        private static void FixFieldNaming(FieldReference field)
+        {
+            FixNaming(field, t => t.Name, (t, name) => t.Name = name,
+                TypeNameToMemberPrefix(field.FieldType.GetElementType().Name));
+        }
+
+        private static void FixPropertyNaming(PropertyReference property)
+        {
+            FixNaming(property, t => t.Name, (t, name) => t.Name = name,
+                TypeNameToMemberPrefix(property.PropertyType.GetElementType().Name));
+        }
+
+        private static string TypeNameToMemberPrefix(string memberName)
+        {
+            return memberName.Replace('.', '_').Replace('[', '_').Replace(']', '_').Replace('`', '_') + "_";
+        }
+
+        private static bool IsException(this TypeDefinition type)
+        {
+            try
+            {
+                for (var currentType = type; currentType != null; currentType = currentType.BaseType?.Resolve())
+                    if (currentType.Name.Contains("Exception"))
+                        return true;
+            }
+            catch (Exception e)
+            {
+                Program.WriteOutput($"Warning: unable to resolve type {type.FullName} or one of its ancestors");
+                Program.WriteOutput($"\t {e.Message}");
+            }
+
+            return false;
+        }
+
+        private static void FixNaming<T>(T member, Func<T, string> getFunc, Action<T, string> setFunc,
+            string namePrefix = "")
+        {
+            var currentName = getFunc(member);
             var newName = TryFixName(currentName);
             if (newName != currentName)
             {
-                member.Name = newName;
-            }
-        }
-
-        private static void FixNaming(MemberReference member)
-        {
-            var currentName = member.Name;
-            var newName = TryFixName(currentName);
-            if (newName != currentName)
-            {
-                member.Name = newName;
+                setFunc(member, namePrefix + newName);
             }
         }
 
@@ -71,18 +160,27 @@ namespace SimpleDeobfuscator
 
             var newName = new StringBuilder(name.Length);
 
-            if (name[0] == '_' || char.IsLetter(name[0]))
+            if (name[0] == '_' || IsLatinLetter(name[0]))
                 newName.Append(name[0]);
             else
                 newName.AppendCharAsPrintable(name[0]);
 
             foreach (var с in name.Skip(1))
-                if (с == '_' || с == '.' || char.IsLetterOrDigit(с))
+                if (с == '_' || с == '.' || IsLatinLetterOrDigit(с))
                     newName.Append(с);
                 else
                     newName.AppendCharAsPrintable(с);
 
             return newName.ToString();
+        }
+
+        private static bool IsLatinLetter(char c)
+        {
+            return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z';
+        }
+        private static bool IsLatinLetterOrDigit(char c)
+        {
+            return c >= '0' && c <= '9' || IsLatinLetter(c);
         }
 
         /// <summary>

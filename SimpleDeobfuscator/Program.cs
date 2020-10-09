@@ -41,6 +41,11 @@ namespace SimpleDeobfuscator
             }
         }
 
+        public static void WriteOutput(string line)
+        {
+            Console.WriteLine(line);
+        }
+
         private static void WriteHelp()
         {
             WriteOutput("Usage:");
@@ -50,11 +55,6 @@ namespace SimpleDeobfuscator
             WriteOutput("\tConsoleApp1.exe will be deobfuscated and saved as ConsoleApp1_1.exe.");
             WriteOutput($"\t{nameof(SimpleDeobfuscator)}.exe SomeLib.dll");
             WriteOutput("\tSomeLib.dll will be deobfuscated and saved as SomeLib_1.exe.");
-        }
-
-        private static void WriteOutput(string line)
-        {
-            Console.WriteLine(line);
         }
     }
 }
